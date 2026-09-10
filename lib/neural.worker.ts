@@ -12,6 +12,27 @@ env.backends.onnx.wasm!.proxy = false;
 
 let model: KokoroTTS | null = null;
 let working = false;
+async function loadModel(id: number) {
+  const load = (device: 'wasm' | 'webgpu') => KokoroTTS.from_pretrained('onnx-community/Kokoro-82M-v1.0-ONNX', {
+    dtype: device === 'webgpu' ? 'fp32' : 'q8', device,
+    progress_callback: progress => {
+      if (progress.status === 'progress' && progress.file.endsWith('.onnx')) workerScope.postMessage({id, type: 'progress', message: `Downloading ${device==='webgpu'?'accelerated':'standard'} AI voice model… ${Math.round(progress.progress)}%`});
+      else if (progress.status === 'done' && progress.file.endsWith('.onnx')) workerScope.postMessage({id, type: 'progress', message: 'Starting the AI voice engine…'});
+    },
+  });
+  let accelerated = false;
+  try {
+    const gpu = (navigator as Navigator & {gpu?: {requestAdapter: () => Promise<unknown>}}).gpu;
+    accelerated = !!(await gpu?.requestAdapter());
+  } catch { /* A standard WASM engine also works without GPU access. */ }
+  if (accelerated) {
+    workerScope.postMessage({id, type: 'progress', message: 'Loading accelerated AI voices… First use downloads about 350 MB.'});
+    try { return await load('webgpu'); }
+    catch { workerScope.postMessage({id, type: 'progress', message: 'Graphics acceleration is unavailable. Loading the standard voice model…'}); }
+  } else workerScope.postMessage({id, type: 'progress', message: 'Loading AI voices… First use downloads about 120 MB.'});
+  return load('wasm');
+}
+
 workerScope.onmessage = async ({data}) => {
   if (working) { workerScope.postMessage({id: data.id, type: 'error', message: 'The voice is busy. Press play again.'}); return; }
   working = true;
@@ -19,14 +40,7 @@ workerScope.onmessage = async ({data}) => {
   try {
     if (typeof text !== 'string' || !text.trim() || text.length > 220 || !NEURAL_VOICES.some(item => item.id === voice) || ![.75, 1, 1.25, 1.5, 2].includes(speed)) throw new Error('Invalid voice, pace, or passage.');
     if (!model) {
-      workerScope.postMessage({id, type: 'progress', message: 'Loading AI voices… First use downloads about 120 MB.'});
-      model = await KokoroTTS.from_pretrained('onnx-community/Kokoro-82M-v1.0-ONNX', {
-        dtype: 'q8', device: 'wasm',
-        progress_callback: progress => {
-          if (progress.status === 'progress' && progress.file.endsWith('.onnx')) workerScope.postMessage({id, type: 'progress', message: `Downloading AI voice model… ${Math.round(progress.progress)}%`});
-          else if (progress.status === 'done' && progress.file.endsWith('.onnx')) workerScope.postMessage({id, type: 'progress', message: 'Starting the AI voice engine…'});
-        },
-      });
+      model = await loadModel(id);
       protectTokenizer(model);
     }
     workerScope.postMessage({id, type: 'progress', message: 'Generating speech…'});
