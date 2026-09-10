@@ -45,4 +45,3 @@ export async function extractFile(file: File): Promise<string> {
   if (text.length > MAX_CHARACTERS) throw new Error('The document is longer than 100,000 characters. Try a smaller section.');
   return text;
 }
-
