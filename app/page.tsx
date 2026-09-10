@@ -9,6 +9,7 @@ import { extractFile } from '../lib/extract-file';
 import { NeuralNarrator } from '../lib/neural-narrator';
 import { NeuralSpeechClient } from '../lib/neural-client';
 import { DEFAULT_NEURAL_VOICE, NEURAL_VOICES, type SpeechEngine, type VoiceProgress } from '../lib/neural-voices';
+import NeuralWorker from '../lib/neural.worker?worker';
 
 type Episode = { id: string; title: string; text: string; passages: string[]; words: number; voice: string; voiceName: string; rate: number; engine: SpeechEngine };
 type ModelContext = { registerTool: (tool: {name: string; description: string; inputSchema: object; annotations: object; execute: (input: unknown) => unknown}, options: {signal: AbortSignal}) => void | Promise<void> };
@@ -76,7 +77,9 @@ export default function Home() {
     setAiSupported(aiAvailable);
     const update = (state: PlaybackSnapshot) => { if (activeEpisodeId.current) positions.current.set(activeEpisodeId.current, state); setPlayback(state); };
     if (aiAvailable) {
-      const speech = new NeuralSpeechClient(setVoiceProgress, () => new Worker(new URL('../lib/neural.worker.ts', import.meta.url), {type: 'module'}));
+      // Let Vite emit the worker constructor. Vinext rewrites import.meta.url in
+      // client components to a build-time file URL, which browsers cannot load.
+      const speech = new NeuralSpeechClient(setVoiceProgress, () => new NeuralWorker());
       neuralNarrator.current = new NeuralNarrator(speech, () => new AudioContext(), update);
     }
     const synth = window.speechSynthesis;

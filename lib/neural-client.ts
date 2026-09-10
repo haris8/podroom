@@ -69,7 +69,12 @@ export class NeuralSpeechClient implements SpeechSource {
         const id = ++this.nextId;
         this.active = {id, resolve, reject, timer: setTimeout(() => this.fail('Voice loading took too long. Check your connection, then press play to retry.'), 240000)};
         this.worker.postMessage({id, text, voice, speed} satisfies SpeechRequest);
-      } catch { this.fail('AI voices are unavailable in this browser. Try a recent Chrome, Edge, Firefox, or Safari, or select Device voices.'); reject(new Error('AI voices are unavailable in this browser.')); }
+      } catch (error) {
+        const message = error instanceof Error && error.name === 'SecurityError'
+          ? 'The AI voice files were blocked from loading. Reload Podroom and press play again. If you opened it inside another app, try its link in your regular browser.'
+          : 'The AI voice player could not start. Reload Podroom and try again, or select Device voices temporarily.';
+        this.fail(message); reject(new Error(message));
+      }
     });
   }
   private fail(message: string) {

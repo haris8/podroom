@@ -88,6 +88,20 @@ test('worker failures reset the engine and allow a clean retry', async () => {
   const f=workerFixture();let p=f.client.generate('one','af_heart',f.signal);const rejected=assert.rejects(p,/stopped/);await tick();f.workers[0].onerror();await rejected;
   p=f.client.generate('one','af_heart',f.signal);await tick();assert.equal(f.workers.length,2);f.reply();await p;f.client.dispose();
 });
+
+test('a blocked worker URL reports a loading problem and can be retried', async () => {
+  const states=[]; let attempts=0; let worker;
+  const client=new NeuralSpeechClient(state=>states.push(state),()=>{
+    if(++attempts===1)throw new DOMException('Worker origin mismatch','SecurityError');
+    worker={postMessage(message){this.message=message;},terminate(){}}; return worker;
+  });
+  const signal=new AbortController().signal;
+  await assert.rejects(client.generate('Hello.','af_heart',signal),/voice files were blocked/);
+  assert.doesNotMatch(states.at(-1).message,/unavailable in this browser/);
+  const retry=client.generate('Hello.','af_heart',signal);await tick();
+  worker.onmessage({data:{id:worker.message.id,type:'audio',samples:new Float32Array(8),sampleRate:24000}});
+  await retry;assert.equal(states.at(-1).status,'ready');client.dispose();
+});
 test('phoneme limits cause recursive splitting instead of silently dropping source', async () => {
   const narrated=[];
   const tts={tokenizer(text,options){assert.equal(options.truncation,false);return {input_ids:{dims:[1,text.length>12?600:20]}};},async generate(text){this.tokenizer(text,{truncation:true});narrated.push(text);return {sampling_rate:24000,audio:new Float32Array([.2,.3])};}};

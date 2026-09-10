@@ -14,7 +14,8 @@
     "db:generate": "drizzle-kit generate",
     "prebuild": "node scripts/prepare-pdf.mjs && node scripts/prepare-speech.mjs",
     "postinstall": "node scripts/prepare-pdf.mjs && node scripts/prepare-speech.mjs",
-    "test": "node --experimental-strip-types --test tests/*.test.mjs"
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
+    "postbuild": "node scripts/verify-speech-build.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",
