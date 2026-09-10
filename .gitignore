@@ -45,4 +45,5 @@ next-env.d.ts
 /outputs/
 /work/
 /public/pdf/
+/public/speech-runtime/
 /tsconfig.tsbuildinfo

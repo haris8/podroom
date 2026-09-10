@@ -60,7 +60,7 @@ export class Narrator {
   }
   pause() {
     // Cancel and retain the latest word boundary; avoids native pause deadlocks on mobile engines.
-    this.cancel(); this.emit('paused');
+    this.cancel(); if (this.status !== 'ended') this.emit('paused');
   }
   seek(index: number) {
     const wasPlaying = this.status === 'playing' || this.status === 'starting';
