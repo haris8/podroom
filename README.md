@@ -10,7 +10,8 @@ Paste text or import TXT, Markdown, text-based PDF, or DOCX files. Review the ex
 - UTF-8 and BOM-marked UTF-16 text files are supported. Scans require OCR elsewhere. Password-protected PDFs need to be unlocked first. Legacy DOC is not supported.
 - Text, document extraction, and Kokoro AI narration run in the browser. Select **AI voices · Free** for English American/British voices, or **Device voices** for the system's available languages. Device voices marked Online may send text to their provider.
 - Narration reads the supplied text with basic Markdown cleanup. It does not generate a conversational script or an audio download.
-- Keep the tab open while listening. Background and lock-screen playback are not guaranteed. Text, episodes, and playback state are temporary and disappear after refresh.
+- Select **Save to library** after creating episodes to keep source text, episode order, voices, speed, and passage progress in your account. Open a saved item to resume on another device. Saved items can be archived and restored. Original uploaded files and generated audio are not stored.
+- Keep the tab open while listening. Background and lock-screen playback are not guaranteed. Unsaved drafts disappear after refresh. Saved playback resumes at a passage boundary, not an exact audio timestamp.
 - AI playback pauses within the current audio passage. Changing pace regenerates speech at the new speaking speed to preserve pitch, resuming at an approximate corresponding position. Device voices pause at the last reported word boundary or restart the current passage.
 
 ## Natural AI voices
@@ -34,7 +35,7 @@ Automatic detection recognizes numbered headings such as `Episode 1: Title`, `Ep
 
 Introductions and contents text before the first real heading remain in the first episode. Only explicit custom separator lines are omitted. No markers means one episode with guidance to try another split method; the app never silently divides the document into arbitrary topics. Review is required after source or split settings change.
 
-Episode selection stops the previous voice and resumes the selected episode from its last passage. Transcript rendering is paginated for long documents. The episode list and progress remain temporary for the open tab, just like the existing single-episode workflow.
+Episode selection stops the previous voice and resumes the selected episode from its last passage. Transcript rendering is paginated for long documents. Save the prepared episode list to your library to keep it across sessions.
 
 ## Development
 
@@ -52,7 +53,13 @@ The postinstall/prebuild task copies PDF.js worker, character maps, fonts, and W
 
 It also copies the exact locked ONNX Runtime WASM modules into `public/speech-runtime`; these generated assets must be deployed alongside the worker bundle. Model weights remain downloaded on demand, rather than committed to Git or bundled into the Sites server. Model download and inference run only after play, not during page load.
 
-The Sites manifest identifies the private deployment. No external API key, D1 database, or R2 bucket is required. The existing Vite/Sites Worker build is retained.
+The Sites manifest enables managed `DB` (D1) and `BUCKET` (R2) bindings. Sites provisions these resources during deployment; this setup does not require a separate Cloudflare signup or API key. D1 stores owner-scoped library metadata, episode settings, and listening progress; R2 stores immutable JSON containing source text and exact transcript passages. The existing Vite/Sites Worker build is retained.
+
+Cloud saving is explicit. Text extraction and speech generation remain in the browser; **Save to library** uploads the prepared source and transcript. New source edits become a new saved copy after creating episodes again. Progress saves on passage changes, pause, completion, and speed changes, with visible retry errors and revision checks for competing devices. Archive retains the source and supports restore. There is no audio export or stored-audio playback pipeline yet.
+
+Library endpoints require Sites-authenticated identity, reject cross-origin mutations, and return private non-cacheable responses. Stable save IDs and content fingerprints make retries safe. D1 metadata and episode rows are committed atomically after R2 upload. An ambiguous database failure may leave an unreferenced source object; it is retained to avoid deleting a successfully committed concurrent save.
+
+For local storage tests, `npm test` uses ephemeral Miniflare D1/R2. For the app preview, build to emit binding configuration, then apply each new generated migration once with `node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0000_nervous_mystique.sql`. Local dev sign-in is provided by `/signin-with-chatgpt?return_to=/`; production identity is injected by Sites.
 
 ## Validation
 

@@ -50,6 +50,10 @@ export class NeuralNarrator {
       void this.start(token, signal, resumed);
     } catch { this.emit('error', 'Audio playback is unavailable. Try another browser.'); }
   }
+  restore(index: number, completed: boolean) {
+    this.stop(false); this.index = Math.max(0, Math.min(this.passages.length - 1, index)); this.offset = 0; this.buffer = null;
+    this.emit(completed ? 'ended' : 'paused');
+  }
   private async start(token: number, signal: AbortSignal, resumed: Promise<void>) {
     try {
       await resumed;

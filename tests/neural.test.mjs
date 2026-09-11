@@ -5,6 +5,11 @@ import {NeuralSpeechClient} from '../lib/neural-client.ts';
 import {protectTokenizer, generateCompletePassage} from '../lib/neural-generation.ts';
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
+test('restored completed AI episode stays finished when paused',()=>{
+  const states=[];const player=new NeuralNarrator({dispose(){}},()=>{throw new Error('No audio needed')},s=>states.push(s));
+  player.prepare(['First.','Last.'],'af_heart',1);player.restore(1,true);player.pause();
+  assert.equal(states.at(-1).status,'ended');assert.equal(states.at(-1).index,1);player.dispose();
+});
 function fixture() {
   const requests = [], nodes = [], states = [];
   const context = {
