@@ -10,6 +10,10 @@ function setup() {
   const player = new Narrator(synth, text => ({text}), state => snapshots.push(state));
   return {player, history, snapshots, state: () => snapshots.at(-1)};
 }
+test('restored completed device episode stays finished when paused, and replay starts at beginning',()=>{
+  const {player,state,history}=setup();player.prepare(['First.','Last.'],'',1);player.restore(1,true);player.pause();
+  assert.equal(state().status,'ended');assert.equal(state().index,1);player.play();assert.equal(history[0].text,'First.');player.dispose();
+});
 
 test('long source text is preserved and bounded for speech', () => {
   for (const source of [SAMPLE_TEXT, 'An unpunctuated passage '.repeat(200), '🙂你好世界'.repeat(200), 'Hi. Why? Great!\nNext paragraph.', 'a'.repeat(2000)]) {

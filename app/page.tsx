@@ -10,6 +10,9 @@ import { NeuralNarrator } from '../lib/neural-narrator';
 import { NeuralSpeechClient } from '../lib/neural-client';
 import { DEFAULT_NEURAL_VOICE, NEURAL_VOICES, type SpeechEngine, type VoiceProgress } from '../lib/neural-voices';
 import NeuralWorker from '../lib/neural.worker?worker';
+import { SavedLibrary, libraryFetch } from '../components/saved-library';
+import { LibrarySync } from '../lib/library-sync';
+import type { LibrarySave } from '../lib/library-store';
 
 type Episode = { id: string; title: string; text: string; passages: string[]; words: number; voice: string; voiceName: string; rate: number; engine: SpeechEngine };
 type ModelContext = { registerTool: (tool: {name: string; description: string; inputSchema: object; annotations: object; execute: (input: unknown) => unknown}, options: {signal: AbortSignal}) => void | Promise<void> };
@@ -44,6 +47,14 @@ export default function Home() {
   const [importing, setImporting] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [files, setFiles] = useState<string[]>([]);
+  const [libraryBusy, setLibraryBusy] = useState(false);
+  const [savedId, setSavedId] = useState('');
+  const [saveId, setSaveId] = useState('');
+  const [libraryTitle, setLibraryTitle] = useState('');
+  const [progressMessage, setProgressMessage] = useState('');
+  const [sync] = useState(() => new LibrarySync((libraryId, id, progress) => libraryFetch(`/api/library/${libraryId}/episodes/${id}`, {method: 'PATCH', body: JSON.stringify(progress), keepalive: true}), setProgressMessage));
+  const restoring = useRef(false);
+  const episodesRef = useRef(episodes); episodesRef.current = episodes;
   const narrator = useRef<Narrator | NeuralNarrator | null>(null);
   const deviceNarrator = useRef<Narrator | null>(null);
   const neuralNarrator = useRef<NeuralNarrator | null>(null);
@@ -62,7 +73,7 @@ export default function Home() {
   const completed = playback.status === 'ended';
   const progress = episode ? (completed ? 1 : playback.index / episode.passages.length) : 0;
   const sourceChanged = episodes.length > 0 && text !== queueSource;
-  const busy = importing || preparing;
+  const busy = importing || preparing || libraryBusy;
   const reviewCurrent = reviewSignature?.text === text && reviewSignature.method === splitMethod && reviewSignature.separator === separator;
   const transcriptPages = episode ? Math.ceil(episode.passages.length / 40) : 0;
   const currentVoice = voices.find(v => v.voiceURI === voice);
@@ -75,7 +86,14 @@ export default function Home() {
     setSupported(available);
     const aiAvailable = 'Worker' in window && 'AudioContext' in window && typeof WebAssembly !== 'undefined';
     setAiSupported(aiAvailable);
-    const update = (state: PlaybackSnapshot) => { if (activeEpisodeId.current) positions.current.set(activeEpisodeId.current, state); setPlayback(state); };
+    const update = (state: PlaybackSnapshot) => {
+      if (activeEpisodeId.current && !restoring.current) {
+        positions.current.set(activeEpisodeId.current, state);
+        const item = episodesRef.current.find(e => e.id === activeEpisodeId.current);
+        if (item && state.status !== 'idle') sync.change(item.id, {index: state.index, completed: state.status === 'ended', rate: item.rate});
+      }
+      setPlayback(state);
+    };
     if (aiAvailable) {
       // Let Vite emit the worker constructor. Vinext rewrites import.meta.url in
       // client components to a build-time file URL, which browsers cannot load.
@@ -88,7 +106,7 @@ export default function Home() {
     const stopOnLeave = () => narrator.current?.pause();
     window.addEventListener('pagehide', stopOnLeave);
     return () => { importToken.current++; importController.current?.abort(); preparationToken.current++; deviceNarrator.current?.dispose(); neuralNarrator.current?.dispose(); deviceNarrator.current = null; neuralNarrator.current = null; narrator.current = null; synth?.removeEventListener('voiceschanged', loadVoices); window.removeEventListener('pagehide', stopOnLeave); };
-  }, []);
+  }, [sync]);
 
   useEffect(() => {
     const context = (document as Document & {modelContext?: ModelContext}).modelContext;
@@ -157,10 +175,12 @@ export default function Home() {
   function activateEpisode(next: Episode, autoplay = false) {
     const saved = positions.current.get(next.id);
     narrator.current?.pause();
+    restoring.current = true;
     activeEpisodeId.current = next.id;
     narrator.current = next.engine === 'neural' ? neuralNarrator.current : deviceNarrator.current;
     narrator.current?.prepare(next.passages,next.voice,next.rate);
-    if (saved && saved.status !== 'ended' && saved.index > 0) narrator.current?.seek(saved.index);
+    if (saved) narrator.current?.restore(saved.index, saved.status === 'ended');
+    restoring.current = false;
     setTranscriptPage(saved && saved.status!=='ended'?Math.floor(saved.index/40):0);
     setEpisode(next);
     if (autoplay) narrator.current?.play();
@@ -181,9 +201,14 @@ export default function Home() {
         const cleaned = cleanText(draft.text); const passages = splitPassages(draft.text);
         if (!passages.length) throw new Error(`Episode ${index+1} has no readable text. Edit the source or merge that split, then try again.`);
         const aiVoice = NEURAL_VOICES.find(item => item.id === neuralVoice)!;
-        created.push({id:`${token}-${draft.id}`,title:draft.title.trim() || `Episode ${index+1}`,text:cleaned,words:wordCount(cleaned),passages,voice:engine==='neural'?neuralVoice:voice,voiceName:engine==='neural'?`${aiVoice.name} · ${aiVoice.accent} AI voice`:currentVoice?.name || 'Device default',rate,engine});
+        created.push({id:crypto.randomUUID(),title:(draft.title.trim() || `Episode ${index+1}`).slice(0,200),text:cleaned,words:wordCount(cleaned),passages,voice:engine==='neural'?neuralVoice:voice,voiceName:engine==='neural'?`${aiVoice.name} · ${aiVoice.accent} AI voice`:currentVoice?.name || 'Device default',rate,engine});
       }
       if(token!==preparationToken.current)return;
+      narrator.current?.pause();
+      if (!await sync.flush()) throw new Error('Save your current listening progress with Retry progress, or reopen the saved item before creating another.');
+      if(token!==preparationToken.current)return;
+      sync.clear(); setSavedId(''); setSaveId(crypto.randomUUID()); setLibraryTitle((title.trim() || created[0].title).slice(0,200));
+      const url = new URL(window.location.href); url.searchParams.delete('library'); window.history.replaceState(null, '', url);
       positions.current.clear(); setEpisodes(created); setQueueSource(text); activateEpisode(created[0]);
       setNotice(`${created.length===1?'Your episode is':`${created.length} episodes are`} ready. Choose an episode and press play.`);
       requestAnimationFrame(() => { output.current?.focus({preventScroll: true}); if (window.innerWidth < 701) output.current?.scrollIntoView({behavior:window.matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth',block:'center'}); });
@@ -192,7 +217,29 @@ export default function Home() {
   }
 
   function sample() { stage.current(SAMPLE_TEXT, SAMPLE_TITLE); setFiles([]); }
-  function updatePlaybackRate(value: number) { setEpisode(prev => prev ? {...prev, rate: value} : prev); setEpisodes(previous=>previous.map(item=>item.id===episode?.id?{...item,rate:value}:item)); narrator.current?.setRate(value); }
+  function updatePlaybackRate(value: number) {
+    const next = episodes.map(item => item.id === episode?.id ? {...item, rate: value} : item);
+    episodesRef.current = next; setEpisodes(next); setEpisode(prev => prev ? {...prev, rate: value} : prev); narrator.current?.setRate(value);
+    if (episode) { const p = positions.current.get(episode.id) ?? playback; sync.change(episode.id, {index: p.index, completed: p.status === 'ended', rate: value}); }
+  }
+  function openLibrary(data: LibrarySave) {
+    restoring.current = true; narrator.current?.pause(); activeEpisodeId.current = ''; restoring.current = false;
+    const loaded: Episode[] = data.episodes.map(e => ({...e, text: e.passages.join(' ')}));
+    stage.current(data.source, data.title); positions.current.clear();
+    for (const e of data.episodes) positions.current.set(e.id, {index: e.progressIndex, status: e.completed ? 'ended' : 'paused', error: ''});
+    setSavedId(data.id); setSaveId(data.id); setLibraryTitle(data.title); setEpisodes(loaded); episodesRef.current = loaded; setQueueSource(data.source); setOutputMode(loaded.length > 1 ? 'series' : 'single');
+    const next = loaded.find(e => !data.episodes.find(s => s.id === e.id)?.completed) ?? loaded[0];
+    if (next) { setEngine(next.engine); setRate(next.rate); if(next.engine==='neural')setNeuralVoice(next.voice);else setVoice(next.voice); activateEpisode(next); }
+    setNotice('Saved source and episodes loaded. Changes to the source become a new saved copy when you create again.');
+  }
+  function librarySaved(id: string) {
+    setSavedId(id);
+    for (const e of episodesRef.current) { const p = positions.current.get(e.id); if(p)sync.change(e.id, {index:p.index, completed:p.status==='ended', rate:e.rate}); }
+  }
+  const libraryDraft: LibrarySave | null = episodes.length ? {id: saveId, title: libraryTitle, source: queueSource, episodes: episodes.map(e => {
+    const p = positions.current.get(e.id);
+    return {id:e.id, title:e.title, passages:e.passages, words:e.words, voice:e.voice, voiceName:e.voiceName, engine:e.engine, rate:e.rate, progressIndex:p?.index ?? 0, completed:p?.status==='ended', revision:0};
+  })} : null;
 
   return <div className="app-shell">
     <header className="app-header"><a className="brand" href="/" aria-label="Podroom home"><span className="brand-icon"><AudioLines size={22}/></span>podroom<span className="brand-period">.</span></a><div className="header-center">YOUR PERSONAL AUDIO STUDIO</div><span className="header-label"><Headphones size={16}/> Made for listening</span></header>
@@ -208,7 +255,7 @@ export default function Home() {
           </div>}
           {files.length>0 && <div className="file-chips" aria-label="Imported documents">{files.map((file,i)=><span key={`${file}-${i}`}><FileText size={12}/>{file}</span>)}</div>}
           {text.length>900000 && <p className="limit-note">{text.length.toLocaleString()} / 1,000,000 characters</p>}
-          {busy && <div className="work-status" role="status"><LoaderCircle size={16} className="spin"/><span>{workProgress || 'Preparing…'}</span><button onClick={cancelWork}>Cancel</button></div>}
+          {(importing || preparing) && <div className="work-status" role="status"><LoaderCircle size={16} className="spin"/><span>{workProgress || 'Preparing…'}</span><button onClick={cancelWork}>Cancel</button></div>}
           <div aria-live="polite" aria-atomic="true">{notice && <p className="notice"><Check size={15}/>{notice}</p>}</div>
           {error && <p role="alert" className="error-message">{error}</p>}
           <div className="settings"><div className="section-heading"><div className="number">02</div><h2>Make it yours</h2></div>
@@ -225,15 +272,16 @@ export default function Home() {
             <div className="settings-row"><label>Narrator{engine==='neural'?<select disabled={busy} value={neuralVoice} onChange={e=>setNeuralVoice(e.target.value)}>{NEURAL_VOICES.map(v=><option key={v.id} value={v.id}>{v.name} · {v.accent} · {v.description}</option>)}</select>:<select disabled={busy} value={voice} onChange={e=>setVoice(e.target.value)}><option value="">Device default</option>{voices.map(v=><option key={`${v.voiceURI}-${v.name}`} value={v.voiceURI}>{v.name} · {v.lang}{v.localService?' · Device':' · Online'}</option>)}</select>}</label><label>Pace<select disabled={busy} value={rate} onChange={e=>setRate(Number(e.target.value))}><option value={0.75}>0.75× · Relaxed</option><option value={1}>1× · Natural</option><option value={1.25}>1.25× · Brisk</option><option value={1.5}>1.5× · Quick</option><option value={2}>2× · Fast</option></select></label></div>
             <p className="voice-help">{engine==='neural'?'Natural English narration with Kokoro. No API key or usage fees. First play downloads about 120–350 MB, depending on your device; later visits can reuse the cached model.':'Voices available on this device, including other languages. Online voices may send text to their provider.'}</p>
             <button className="create-button" disabled={!text.trim() || !canCreate || busy || (outputMode==='series' && (!reviewCurrent || !drafts.length))} onClick={()=>void createEpisode()}><WandSparkles size={19}/>{preparing?'Preparing episodes…':outputMode==='series'?`Create ${reviewCurrent?drafts.length:''} episodes`:episode?'Create new podcast':'Create podcast'}<ArrowUpRight size={20}/></button>
-            {canCreate===false ? <p className="error-message">{engine==='neural'?'AI voices need WebAssembly and browser audio. Try a recent browser, or choose Device voices above.':'Device speech is unavailable in this browser. Choose AI voices above or try another browser.'}</p> : <p className="settings-note">{engine==='neural'?'AI-generated speech. Your text stays in this browser.':'Your words, narrated in full with your browser’s voices.'}</p>}
+            {canCreate===false ? <p className="error-message">{engine==='neural'?'AI voices need WebAssembly and browser audio. Try a recent browser, or choose Device voices above.':'Device speech is unavailable in this browser. Choose AI voices above or try another browser.'}</p> : <p className="settings-note">{engine==='neural'?'AI-generated speech. Text is uploaded only when you save to your library.':'Your words, narrated in full with your browser’s voices.'}</p>}
             {sourceChanged && <p className="source-changed">Source changed. Create again to update your episodes.</p>}
           </div>
+          <SavedLibrary draft={libraryDraft} savedId={savedId} busy={busy} sync={sync} progressMessage={progressMessage} onOpen={openLibrary} onSaved={librarySaved} onBusy={setLibraryBusy} onPause={() => narrator.current?.pause()}/>
         </section>
-        <section className="episode-column" aria-labelledby="listen-heading">
+        <section className="episode-column" aria-labelledby="listen-heading" inert={libraryBusy}>
           <div className="section-heading output-heading"><div className="number">03</div><h2 id="listen-heading">Press play. Tune in.</h2>{episode&&<span className="ready-label"><Check size={12}/>READY TO LISTEN</span>}</div>
           <div className={`player-card ${playing?'is-playing':''}`}><div className="player-top"><span>{episode?'YOUR WORDS, ON AIR':'PODROOM ORIGINAL'}</span><AudioLines size={24}/></div><div className="cover-copy"><p>{episode?'A PERSONAL LISTEN':'FROM THE PAGE'}</p><h2>To your<br/>headphones<span>.</span></h2></div><div className="waveform" aria-hidden="true">{Array.from({length:57},(_,i)=><span key={i} style={{height:`${Math.round(14+Math.abs(Math.sin(i*.79)*Math.cos(i*.23))*75)}%`,animationDelay:`${-i*8/100}s`}}/>)}</div><div className="player-bottom"><span>{episode?`${episode.words.toLocaleString()} WORDS · FULL NARRATION`:'YOUR NEXT LISTEN'}</span><span>{episode?(episode.engine==='neural'?'AI AUDIO':'DEVICE AUDIO'):'VOL. 001'}</span></div></div>
           <div className="playback-panel">
-            {episodes.length>1 && <div className="episode-library"><div className="library-heading"><h3>Your episodes</h3><span>{episodes.length} ready</span></div><p className="split-help">Choose an episode to listen. Progress stays here while this tab is open.</p><ol>{episodes.map((item,index)=><li key={item.id} className={episode?.id===item.id?'selected':''}><button aria-label={"Play episode "+(index+1)+": "+item.title} aria-current={episode?.id===item.id?'true':undefined} onClick={()=>{if(episode?.id===item.id){playing?narrator.current?.pause():narrator.current?.play();}else activateEpisode(item,true);}}><span className="library-number">{episode?.id===item.id&&playing?<Pause size={15}/>:<Play size={15}/>}</span><span className="library-text"><strong>{item.title}</strong><small>{item.words.toLocaleString()} words · ~{formatTime(item.words/(165*item.rate)*60)}</small></span><span className="library-index">{String(index+1).padStart(2,'0')}</span></button></li>)}</ol></div>}
+            {episodes.length>1 && <div className="episode-library"><div className="library-heading"><h3>Your episodes</h3><span>{episodes.length} ready</span></div><p className="split-help">Choose an episode to listen. Save to your library to keep your progress.</p><ol>{episodes.map((item,index)=><li key={item.id} className={episode?.id===item.id?'selected':''}><button aria-label={"Play episode "+(index+1)+": "+item.title} aria-current={episode?.id===item.id?'true':undefined} onClick={()=>{if(episode?.id===item.id){playing?narrator.current?.pause():narrator.current?.play();}else activateEpisode(item,true);}}><span className="library-number">{episode?.id===item.id&&playing?<Pause size={15}/>:<Play size={15}/>}</span><span className="library-text"><strong>{item.title}</strong><small>{item.words.toLocaleString()} words · ~{formatTime(item.words/(165*item.rate)*60)}</small></span><span className="library-index">{String(index+1).padStart(2,'0')}</span></button></li>)}</ol></div>}
           <div className="episode-meta"><div><h3 ref={output} tabIndex={-1}>{episode?.title || 'Your episode lives here'}</h3><p>{episode?`${episode.voiceName} · About ${formatTime(duration)}`:'Add your source and create your first listen.'}</p></div><span className="audio-badge"><Headphones size={18}/></span></div>
             {episode ? <input className="progress-slider" type="range" min={0} max={Math.max(0,episode.passages.length-1)} value={playback.index} onChange={e=>narrator.current?.seek(Number(e.target.value))} aria-label="Jump to a transcript passage" aria-valuetext={`Passage ${playback.index+1} of ${episode.passages.length}`} style={{'--progress':`${progress*100}%`} as React.CSSProperties}/> : <div className="empty-progress"/>}
             <div className="time-row"><span>{formatTime(progress*duration)}</span><span>{episode?`${formatTime(duration)} estimated`:'—:—'}</span></div>
@@ -243,8 +291,9 @@ export default function Home() {
             {playback.error && <p className="error-message" role="alert">{playback.error}</p>}
           </div>
           {episode ? <details className="transcript" open><summary><span><FileText size={17}/>Episode transcript</span><ChevronDown size={17}/></summary><p className="transcript-help">Choose a passage to jump there, then press play.</p><div className="transcript-scroll">{episode.passages.slice(transcriptPage*40,(transcriptPage+1)*40).map((passage,localIndex)=>{const i=transcriptPage*40+localIndex;return <button key={i} className={`transcript-passage ${i===playback.index?'current':''}`} aria-label={`Jump to passage ${i+1}: ${passage}`} aria-current={i===playback.index?'true':undefined} onClick={()=>narrator.current?.seek(i)}><span className="passage-number">{String(i+1).padStart(2,'0')}</span><span>{passage}</span></button>;})}</div>{transcriptPages>1 && <div className="transcript-pagination"><button disabled={transcriptPage===0} onClick={()=>setTranscriptPage(page=>page-1)}>Previous</button><span>{transcriptPage+1} / {transcriptPages}</span><button disabled={transcriptPage>=transcriptPages-1} onClick={()=>setTranscriptPage(page=>page+1)}>Next</button><button onClick={()=>setTranscriptPage(Math.floor(playback.index/40))}>Current passage</button></div>}</details> : <div className="listen-note"><span><FileText size={20}/></span><div><h3>A little less screen. A little more listening.</h3><p>Turn your reading into listening time. Your transcript will appear here once your episode is ready.</p></div></div>}
-          <details className="about-audio"><summary>About the voices<ChevronDown size={13}/></summary><p>AI voices use Kokoro to generate English speech in this browser. The model and voice files download from Hugging Face; your text is processed on your device. The first download is about 120 MB for standard voices or 350 MB with graphics acceleration. If acceleration fails, the standard model downloads separately. Generation speed depends on your device, and longer documents may pause between passages.</p><p>Keep this tab open while listening. Audio is generated a passage at a time, with a small temporary cache. Episodes and audio are not saved after a refresh. This app narrates your text; it does not rewrite it as a conversation or offer an MP3 download.</p><p>Device voices are also available. Voices marked “Online” may send text to their provider. AI audio pauses at the current position; device voices resume from the latest reported word boundary or the start of the passage.</p></details>
+          <details className="about-audio"><summary>About the voices<ChevronDown size={13}/></summary><p>AI voices use Kokoro to generate English speech in this browser. The model and voice files download from Hugging Face; your text is processed on your device. The first download is about 120 MB for standard voices or 350 MB with graphics acceleration. If acceleration fails, the standard model downloads separately. Generation speed depends on your device, and longer documents may pause between passages.</p><p>Keep this tab open while listening. Audio is generated a passage at a time, with a small temporary cache. Save to library to keep source text, episodes, and passage progress in your account. Unsaved drafts disappear after refresh. Audio and original files are not stored. This app narrates your text; it does not rewrite it as a conversation or offer an MP3 download.</p><p>Device voices are also available. Voices marked “Online” may send text to their provider. AI audio pauses at the current position; device voices resume from the latest reported word boundary or the start of the passage.</p></details>
         </section>
-      </div><footer><span><AudioLines size={16}/> A new way to hear your words.</span><span>BUILT FOR YOUR EARS</span></footer>
+      </div>
+      <footer><span><AudioLines size={16}/> A new way to hear your words.</span><span>BUILT FOR YOUR EARS</span></footer>
     </main></div>;
 }

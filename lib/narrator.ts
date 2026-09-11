@@ -58,6 +58,10 @@ export class Narrator {
     this.timer = setTimeout(() => fail('The voice did not start. Try play again, or select a different narrator.'), 12000);
     try { this.synth.resume(); this.synth.speak(u); } catch { fail('Speech is unavailable. Try another browser or voice.'); }
   }
+  restore(index: number, completed: boolean) {
+    this.cancel(); this.index = Math.max(0, Math.min(this.passages.length - 1, index)); this.offset = 0;
+    this.emit(completed ? 'ended' : 'paused');
+  }
   pause() {
     // Cancel and retain the latest word boundary; avoids native pause deadlocks on mobile engines.
     this.cancel(); if (this.status !== 'ended') this.emit('paused');
